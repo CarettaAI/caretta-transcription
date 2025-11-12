@@ -28,7 +28,7 @@ async def ws_asr(ws: WebSocket):
         try:
             while True:
                 frame = await ws.receive_bytes()
-                logger.debug("[ws %s] recv frame: %d bytes", conn_id, len(frame))
+                #logger.debug("[ws %s] recv frame: %d bytes", conn_id, len(frame))
                 for chunk in vad.feed(frame):
                     await transcription_queue.put(StreamTask(conn_id=conn_id, chunk=chunk))
                     logger.debug("[ws %s] queued chunk: %s (%d samp) final=%s", conn_id, chunk.chunk_id, len(chunk), chunk.is_final)
