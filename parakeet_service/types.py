@@ -11,6 +11,8 @@ class AudioChunk:
     chunk_id: str
     pcm16: bytes
     sample_rate: int
+    # True if this chunk corresponds to an utterance end from VAD
+    is_final: bool = False
 
     def to_float32(self) -> np.ndarray:
         """Return normalised float32 waveform [-1, 1]."""

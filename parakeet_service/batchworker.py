@@ -33,6 +33,7 @@ async def batch_worker(
     while True:
         task = await transcription_queue.get()
         batch: List[StreamTask] = [task]
+        logger.debug("batch_worker: got first task (conn=%s, chunk=%s)", task.conn_id, task.chunk.chunk_id)
 
         deadline = time.monotonic() + batch_ms / 1000.0
         while len(batch) < max_batch:
@@ -45,6 +46,7 @@ async def batch_worker(
                 break
             else:
                 batch.append(nxt)
+        logger.debug("batch_worker: executing batch size=%d", len(batch))
 
         try:
             decoded = await asyncio.to_thread(engine.process_batch, batch)
@@ -56,10 +58,12 @@ async def batch_worker(
                 transcription_queue.task_done()
 
         if not decoded:
+            logger.debug("batch_worker: no decoded results for batch size=%d", len(batch))
             continue
 
         for item in decoded:
             results[item.conn_id].append(item)
+        logger.debug("batch_worker: published %d results", len(decoded))
 
         async with condition:
             condition.notify_all()

@@ -7,6 +7,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from .batchworker import condition, results, transcription_queue
 from .streaming_engine import StreamTask, StreamingEngine
 from .streaming_vad import StreamingVAD
+from .config import logger
 
 router = APIRouter()
 
@@ -18,6 +19,7 @@ async def ws_asr(ws: WebSocket):
     engine: StreamingEngine = ws.app.state.streaming_engine  # type: ignore[attr-defined]
     conn_id = uuid.uuid4().hex
     engine.create_session(conn_id)
+    logger.debug("[ws %s] connection opened", conn_id)
     results.pop(conn_id, None)  # ensure clean slate
     vad = StreamingVAD()
 
@@ -26,9 +28,11 @@ async def ws_asr(ws: WebSocket):
         try:
             while True:
                 frame = await ws.receive_bytes()
+                logger.debug("[ws %s] recv frame: %d bytes", conn_id, len(frame))
                 for chunk in vad.feed(frame):
                     await transcription_queue.put(StreamTask(conn_id=conn_id, chunk=chunk))
-                    await ws.send_json({"status": "queued", "chunk_id": chunk.chunk_id})
+                    logger.debug("[ws %s] queued chunk: %s (%d samp) final=%s", conn_id, chunk.chunk_id, len(chunk), chunk.is_final)
+                    await ws.send_json({"status": "queued", "chunk_id": chunk.chunk_id, "is_final": chunk.is_final})
         except WebSocketDisconnect:
             pass
         finally:
@@ -47,6 +51,7 @@ async def ws_asr(ws: WebSocket):
 
                 while queue:
                     item = queue.popleft()
+                    logger.debug("[ws %s] sending result: chunk=%s, final=%s, text='%s'", conn_id, item.chunk_id, item.is_final, item.text)
                     await ws.send_json(
                         {
                             "chunk_id": item.chunk_id,
@@ -63,5 +68,6 @@ async def ws_asr(ws: WebSocket):
     finally:
         engine.close_session(conn_id)
         results.pop(conn_id, None)
+        logger.debug("[ws %s] connection closed", conn_id)
         with contextlib.suppress(Exception):
             await ws.close()

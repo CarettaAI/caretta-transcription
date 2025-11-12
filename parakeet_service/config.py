@@ -19,7 +19,7 @@ PROCESSING_TIMEOUT = int(os.getenv("PROCESSING_TIMEOUT", "60"))    # seconds
 # Streaming configuration
 STREAM_CHUNK_MS = int(os.getenv("STREAM_CHUNK_MS", "640"))              # target chunk duration (ms)
 STREAM_LEFT_CONTEXT_MS = int(os.getenv("STREAM_LEFT_CONTEXT_MS", "9600"))
-STREAM_RIGHT_CONTEXT_MS = int(os.getenv("STREAM_RIGHT_CONTEXT_MS", "320"))
+STREAM_RIGHT_CONTEXT_MS = int(os.getenv("STREAM_RIGHT_CONTEXT_MS", "0"))  # Set to 0 for consistent feeding
 STREAM_MAX_UNFLUSHED_MS = int(os.getenv("STREAM_MAX_UNFLUSHED_MS", "1600"))
 STREAM_BATCH_WINDOW_MS = float(os.getenv("STREAM_BATCH_WINDOW_MS", "20"))
 STREAM_MAX_BATCH = int(os.getenv("STREAM_MAX_BATCH", "4"))
@@ -33,7 +33,9 @@ STREAM_MAX_UNFLUSHED_SECS = STREAM_MAX_UNFLUSHED_MS / 1000.0
 # VAD / streaming audio params (configurable via .env)
 # SAMPLE_RATE kept for backward-compatibility; defaults to TARGET_SR
 SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", str(TARGET_SR)))
-VAD_WINDOW_SAMPLES = int(os.getenv("VAD_WINDOW_SAMPLES", "512"))
+# Default VAD window 640 samples (40 ms @ 16 kHz) to align with typical RNNT subsampling (4x @ 10ms)
+# If you override this via env, ensure it's a multiple of the encoder frame size reported at service start.
+VAD_WINDOW_SAMPLES = int(os.getenv("VAD_WINDOW_SAMPLES", "640"))
 VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.60"))
 VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "250"))
 VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "120"))
