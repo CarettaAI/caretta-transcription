@@ -1,30 +1,40 @@
-import asyncio, logging, time, torch
-from typing import List
+import asyncio
+import logging
+import time
+from collections import defaultdict, deque
+from typing import Deque, Dict, List
 
-from parakeet_service import model as mdl
-from parakeet_service.types import AudioChunk
+from .config import STREAM_BATCH_WINDOW_MS, STREAM_MAX_BATCH, STREAM_QUEUE_CAPACITY
+from .streaming_engine import StreamResult, StreamTask, StreamingEngine
 
 logger = logging.getLogger("batcher")
-logger.setLevel(logging.DEBUG)
-
-# -------- shared state -------------------------------------------------------
-transcription_queue: asyncio.Queue[AudioChunk] = asyncio.Queue()
-condition = asyncio.Condition()          # wakes websocket consumers
-results: dict[str, str] = {}             # chunk_id -> text
+logger.setLevel(logging.INFO)
 
 
-# -------- main worker --------------------------------------------------------
-async def batch_worker(model, batch_ms: float = 15.0, max_batch: int = 4):
-    """Forever drain `transcription_queue` → ASR → `results`."""
-    logger.info("worker started (batch ≤%d, window %.0f ms)", max_batch, batch_ms)
-    logger.info("worker started with model id=%s", id(model))
+transcription_queue: asyncio.Queue[StreamTask] = asyncio.Queue(maxsize=STREAM_QUEUE_CAPACITY)
+condition = asyncio.Condition()  # wakes websocket consumers
+results: Dict[str, Deque[StreamResult]] = defaultdict(deque)
+
+
+async def batch_worker(
+    engine: StreamingEngine,
+    batch_ms: float = STREAM_BATCH_WINDOW_MS,
+    max_batch: int = STREAM_MAX_BATCH,
+) -> None:
+    """Drain queued streaming chunks, run inference off-thread, publish results."""
+
+    logger.info(
+        "worker started (batch ≤%d, window %.0f ms, sessions=%d)",
+        max_batch,
+        batch_ms,
+        engine.active_session_count(),
+    )
 
     while True:
-        first = await transcription_queue.get()      # blocks until 1st item
-        batch: List[AudioChunk] = [first]
+        task = await transcription_queue.get()
+        batch: List[StreamTask] = [task]
 
-        # ---------- micro-batch gathering with timeout ----------
-        deadline = time.monotonic() + batch_ms / 1000
+        deadline = time.monotonic() + batch_ms / 1000.0
         while len(batch) < max_batch:
             timeout = deadline - time.monotonic()
             if timeout <= 0:
@@ -36,45 +46,20 @@ async def batch_worker(model, batch_ms: float = 15.0, max_batch: int = 4):
             else:
                 batch.append(nxt)
 
-        logger.debug("processing %d in-memory chunks", len(batch))
-
-        # ---------- inference ----------
         try:
-            with torch.inference_mode():
-                outs = mdl.transcribe_stream_chunks(
-                    model, batch, batch_size=len(batch)
-                )
-        except Exception as exc:
-            logger.exception("ASR failed: %s", exc)
+            decoded = await asyncio.to_thread(engine.process_batch, batch)
+        except Exception:  # pragma: no cover - defensive log
+            logger.exception("Streaming batch execution failed")
+            decoded = []
+        finally:
             for _ in batch:
                 transcription_queue.task_done()
+
+        if not decoded:
             continue
 
-        # ---------- store results & notify ----------
-        hyp_iter = iter(outs)
-        for chunk in batch:
-            try:
-                hyp = next(hyp_iter)
-            except StopIteration:
-                logger.warning(
-                    "ASR returned fewer hypotheses (%d) than chunks (%d)",
-                    len(outs),
-                    len(batch),
-                )
-                transcription_queue.task_done()
-                continue
-
-            results[chunk.chunk_id] = getattr(hyp, "text", str(hyp))
-            transcription_queue.task_done()            # mark done
+        for item in decoded:
+            results[item.conn_id].append(item)
 
         async with condition:
             condition.notify_all()
-
-        try:
-            extra = next(hyp_iter)
-        except StopIteration:
-            extra = None
-        if extra is not None:
-            logger.warning(
-                "ASR returned more hypotheses than requested; dropping extras"
-            )

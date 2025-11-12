@@ -5,7 +5,8 @@ import tempfile
 import wave
 from pathlib import Path
 from typing import List, Sequence
-import torch, asyncio
+import asyncio
+import torch
 import nemo.collections.asr as nemo_asr  # type: ignore[import]
 from omegaconf import open_dict
 
@@ -13,6 +14,7 @@ from .config import MODEL_NAME, MODEL_PRECISION, DEVICE, logger
 
 from parakeet_service.batchworker import batch_worker
 from parakeet_service.types import AudioChunk
+from parakeet_service.streaming_engine import StreamingEngine
 
 
 def _to_builtin(obj):
@@ -43,16 +45,41 @@ async def lifespan(app):
             map_location=DEVICE # type: ignore
         ).to(dtype=dtype) # type: ignore
         logger.info("Loaded model with %s weights on %s", MODEL_PRECISION.upper(), DEVICE)
-        
-    # Aggressive cleanup
-    gc.collect()
-    torch.cuda.empty_cache()
-    logger.info("Memory cleanup complete")
+
+    if hasattr(model, "preprocessor"):
+        try:
+            model.preprocessor.featurizer.dither = 0.0  # type: ignore[attr-defined]
+            model.preprocessor.featurizer.pad_to = 0    # type: ignore[attr-defined]
+        except AttributeError:
+            logger.debug("Preprocessor lacks featurizer controls; skipping stream tweaks")
+
+    if hasattr(model, "change_decoding_strategy") and hasattr(model.cfg, "decoding"):
+        with open_dict(model.cfg.decoding):
+            model.cfg.decoding.compute_timestamps = False
+            model.cfg.decoding.preserve_alignments = False
+            if hasattr(model.cfg.decoding, "greedy"):
+                model.cfg.decoding.greedy.loop_labels = True  # type: ignore[attr-defined]
+        model.change_decoding_strategy(model.cfg.decoding)
+
+    model.eval()
+    if hasattr(model, "freeze"):
+        model.freeze()
+
+    engine = StreamingEngine(model)
+
+    if torch.cuda.is_available():
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.info("Memory cleanup complete")
+    else:
+        gc.collect()
+        logger.info("CPU-only memory cleanup complete")
 
     app.state.asr_model = model
+    app.state.streaming_engine = engine
     logger.info("Model ready on %s", next(model.parameters()).device)
 
-    app.state.worker = asyncio.create_task(batch_worker(model), name="batch_worker")
+    app.state.worker = asyncio.create_task(batch_worker(engine), name="batch_worker")
     logger.info("batch_worker scheduled")
 
     try:
@@ -64,6 +91,8 @@ async def lifespan(app):
 
         logger.info("Releasing GPU memory and shutting down worker")
         del app.state.asr_model
+        engine.shutdown()
+        del app.state.streaming_engine
         if torch.cuda.is_available():
             torch.cuda.empty_cache()  # free cache but keep driver
 

@@ -16,6 +16,28 @@ MAX_AUDIO_DURATION = int(os.getenv("MAX_AUDIO_DURATION", "30"))   # seconds
 VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
 PROCESSING_TIMEOUT = int(os.getenv("PROCESSING_TIMEOUT", "60"))    # seconds
 
+# Streaming configuration
+STREAM_CHUNK_MS = int(os.getenv("STREAM_CHUNK_MS", "640"))              # target chunk duration (ms)
+STREAM_LEFT_CONTEXT_MS = int(os.getenv("STREAM_LEFT_CONTEXT_MS", "9600"))
+STREAM_RIGHT_CONTEXT_MS = int(os.getenv("STREAM_RIGHT_CONTEXT_MS", "320"))
+STREAM_MAX_UNFLUSHED_MS = int(os.getenv("STREAM_MAX_UNFLUSHED_MS", "1600"))
+STREAM_BATCH_WINDOW_MS = float(os.getenv("STREAM_BATCH_WINDOW_MS", "20"))
+STREAM_MAX_BATCH = int(os.getenv("STREAM_MAX_BATCH", "4"))
+STREAM_QUEUE_CAPACITY = int(os.getenv("STREAM_QUEUE_CAPACITY", "512"))
+
+STREAM_CHUNK_SECS = STREAM_CHUNK_MS / 1000.0
+STREAM_LEFT_CONTEXT_SECS = STREAM_LEFT_CONTEXT_MS / 1000.0
+STREAM_RIGHT_CONTEXT_SECS = STREAM_RIGHT_CONTEXT_MS / 1000.0
+STREAM_MAX_UNFLUSHED_SECS = STREAM_MAX_UNFLUSHED_MS / 1000.0
+
+# VAD / streaming audio params (configurable via .env)
+# SAMPLE_RATE kept for backward-compatibility; defaults to TARGET_SR
+SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", str(TARGET_SR)))
+VAD_WINDOW_SAMPLES = int(os.getenv("VAD_WINDOW_SAMPLES", "512"))
+VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.60"))
+VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "250"))
+VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "120"))
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=LOG_LEVEL,
