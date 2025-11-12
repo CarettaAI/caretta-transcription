@@ -73,10 +73,9 @@ class StreamingSession:
         self.hyps: Optional[BatchedHyps] = None
         self.last_text: str = ""
         self.is_closed = False
-        # Pending audio samples not yet fed to buffer; we will feed only exact
-        # (chunk+right) sized blocks and aligned to encoder frames. Shape: [1, n]
+        # Pending audio samples accumulated across VAD chunks
         self._pending: Optional[torch.Tensor] = None
-        # Whether the buffer has received the initial (chunk+right) priming block
+        # Whether we've fed the initial (chunk+right) samples for initial latency
         self._primed: bool = False
 
     def close(self) -> None:
@@ -104,6 +103,13 @@ class StreamingSession:
         logger.debug("[%s] reset for new utterance", self.conn_id)
 
     def consume_chunk(self, chunk: AudioChunk) -> Optional[StreamResult]:
+        """
+        Process an audio chunk following the reference implementation strategy:
+        1. First feed: chunk + right samples (initial latency window)
+        2. Subsequent feeds: chunk samples only
+        3. Buffer maintains: left + chunk + right context
+        4. Decode only: chunk portion (after removing left context)
+        """
         if self.is_closed:
             logger.debug("Skipping chunk for closed session %s", self.conn_id)
             return None
@@ -117,174 +123,175 @@ class StreamingSession:
         if audio.ndim != 1:
             audio = audio.squeeze(0)
         audio = audio.unsqueeze(0).to(dtype=self.engine.buffer_dtype)
-        logger.debug(
-            "[%s] consume_chunk: got chunk_id=%s, len=%d samp (%.1f ms), pending=%d, primed=%s",
-            self.conn_id,
-            chunk.chunk_id,
-            audio.shape[1],
-            1000.0 * audio.shape[1] / float(TARGET_SR),
-            0 if (self._pending is None) else int(self._pending.shape[1]),
-            self._primed,
-        )
-
+        
         # Append to pending buffer
         if self._pending is not None and self._pending.numel() > 0:
             audio = torch.cat([self._pending, audio], dim=1)
-            logger.debug("[%s] pending concat -> total=%d samp", self.conn_id, int(audio.shape[1]))
+        
+        logger.debug(
+            "[%s] consume_chunk: chunk_id=%s, incoming=%d samp, total_pending=%d samp (%.1f ms), primed=%s",
+            self.conn_id,
+            chunk.chunk_id,
+            audio.shape[1] - (0 if self._pending is None else self._pending.shape[1]),
+            audio.shape[1],
+            1000.0 * audio.shape[1] / float(TARGET_SR),
+            self._primed,
+        )
 
         if audio.shape[1] == 0:
             return None
 
         frame_samples = self.engine.encoder_frame2audio_samples
-        # We can only advance in full encoder frames
-        total_full = (audio.shape[1] // frame_samples) * frame_samples
-        if total_full == 0:
-            self._pending = audio  # wait for more samples
-            logger.debug("[%s] not frame-aligned yet -> stash=%d", self.conn_id, int(audio.shape[1]))
-            return None
-
-        # Determine how much to feed: we always feed fixed chunk-sized blocks except for the
-        # final chunk which may be shorter.
         chunk_samples = self.engine.context_samples.chunk
-
-        # Keep only fully frame-aligned portion for processing; stash tail
-        processable = audio[:, :total_full]
-        tail = audio[:, total_full:]
-        if chunk.is_final and tail.numel() > 0:
-            logger.debug("[%s] final chunk discarding %d non-frame samples", self.conn_id, int(tail.shape[1]))
-            tail = tail[:, 0:0]
-        if tail.numel() > 0:
-            logger.debug("[%s] tail not full frame: %d samp stashed", self.conn_id, int(tail.shape[1]))
+        right_samples = self.engine.context_samples.right
+        
+        # Initial latency window size: chunk + right
+        initial_window_samples = chunk_samples + right_samples
 
         latest_text: Optional[str] = None
-        # Helper to feed the buffer with proper last-chunk flags
-        def _feed_buffer(block: torch.Tensor, is_last_chunk: bool) -> Optional[str]:
-            if block.shape[1] == 0:
+        
+        # Helper to feed buffer and decode
+        def _feed_and_decode(audio_block: torch.Tensor, is_last: bool) -> Optional[str]:
+            if audio_block.shape[1] == 0:
                 return None
-            audio_lengths = torch.tensor([block.shape[1]], dtype=torch.long, device=device)
-            last_flag = torch.tensor([is_last_chunk], dtype=torch.bool, device=device)
-            self.buffer.add_audio_batch_(block, audio_lengths, is_last_chunk, last_flag)
+            
+            # Ensure frame alignment
+            aligned_len = (audio_block.shape[1] // frame_samples) * frame_samples
+            if aligned_len == 0:
+                if is_last:
+                    # Pad to frame alignment for final chunk
+                    pad_needed = frame_samples - audio_block.shape[1]
+                    audio_block = torch.cat([
+                        audio_block,
+                        torch.zeros((1, pad_needed), dtype=audio_block.dtype, device=device)
+                    ], dim=1)
+                    aligned_len = frame_samples
+                else:
+                    return None
+            
+            audio_block = audio_block[:, :aligned_len]
+            audio_lengths = torch.tensor([audio_block.shape[1]], dtype=torch.long, device=device)
+            is_last_batch = torch.tensor([is_last], dtype=torch.bool, device=device)
+            
+            self.buffer.add_audio_batch_(audio_block, audio_lengths, is_last, is_last_batch)
             return self._decode_and_update()
 
-        # Feed as many full blocks as available
-        
-        # Strategy: Always feed exactly chunk_samples to maintain constant right-context (which is 0)
-        # NeMo's buffer requires consistent right-context across all feeds
+        # PRIMING PHASE: Feed initial (chunk + right) samples
         if not self._primed:
-            if processable.shape[1] < chunk_samples:
-                # Not enough to prime
-                if chunk.is_final:
-                    # Not enough audio to safely prime; treat as empty final
-                    logger.debug("[%s] final before prime (have=%d < need=%d): finalize empty", self.conn_id, int(processable.shape[1]), chunk_samples)
-                    # Reset session state for next utterance
-                    self._reset_for_new_utterance()
-                    return StreamResult(
-                        conn_id=self.conn_id,
-                        chunk_id=chunk.chunk_id,
-                        text="",
-                        delta="",
-                        is_final=True,
-                    )
-                # Not final: wait for more
-                self._pending = audio  # keep everything
+            if audio.shape[1] < initial_window_samples and not chunk.is_final:
+                # Wait for enough samples to fill initial window
+                self._pending = audio
                 logger.debug(
-                    "[%s] need prime (%d) but only have %d -> waiting",
+                    "[%s] PRIME: waiting for %d samples (have %d)",
                     self.conn_id,
-                    chunk_samples,
-                    int(processable.shape[1]),
+                    initial_window_samples,
+                    audio.shape[1],
                 )
                 return None
-            remaining_after = processable[:, chunk_samples:]
-            to_feed = processable[:, :chunk_samples]
-            is_last_chunk = chunk.is_final and remaining_after.shape[1] == 0 and tail.numel() == 0
-            processable = remaining_after
+            
+            # Feed the initial window (or all available if final and less than window)
+            feed_size = min(initial_window_samples, audio.shape[1])
+            to_feed = audio[:, :feed_size]
+            remaining = audio[:, feed_size:]
+            
+            is_last = chunk.is_final and remaining.shape[1] == 0
+            
             logger.debug(
-                "[%s] PRIME feed: %d samples, remain=%d",
+                "[%s] PRIME: feeding %d samples (%.1f ms), remaining=%d, is_last=%s",
                 self.conn_id,
-                chunk_samples,
-                int(processable.shape[1]),
+                to_feed.shape[1],
+                1000.0 * to_feed.shape[1] / float(TARGET_SR),
+                remaining.shape[1],
+                is_last,
             )
-
-            text = _feed_buffer(to_feed, is_last_chunk)
+            
+            text = _feed_and_decode(to_feed, is_last)
             if text is not None:
                 latest_text = text
+            
             self._primed = True
+            audio = remaining
 
-        # Feed fixed-size chunk blocks
-        while processable.shape[1] >= chunk_samples:
-            remaining_after = processable[:, chunk_samples:]
-            to_feed = processable[:, :chunk_samples]
-            is_last_chunk = chunk.is_final and remaining_after.shape[1] == 0 and tail.numel() == 0
-            processable = remaining_after
+        # STREAMING PHASE: Feed fixed chunk-sized blocks
+        while audio.shape[1] >= chunk_samples:
+            to_feed = audio[:, :chunk_samples]
+            remaining = audio[:, chunk_samples:]
+            
+            is_last = chunk.is_final and remaining.shape[1] == 0
+            
             logger.debug(
-                "[%s] CHUNK feed: %d, remain=%d",
+                "[%s] CHUNK: feeding %d samples (%.1f ms), remaining=%d, is_last=%s",
                 self.conn_id,
-                chunk_samples,
-                int(processable.shape[1]),
+                to_feed.shape[1],
+                1000.0 * to_feed.shape[1] / float(TARGET_SR),
+                remaining.shape[1],
+                is_last,
             )
-
-            text = _feed_buffer(to_feed, is_last_chunk)
+            
+            text = _feed_and_decode(to_feed, is_last)
             if text is not None:
                 latest_text = text
+            
+            audio = remaining
 
-        # If this is a final chunk, flush any remaining full-frame audio even if less than chunk
-        if chunk.is_final and processable.shape[1] > 0:
-            to_feed = processable
-            processable = processable[:, 0:0]
+        # FINAL FLUSH: Process remaining samples if this is the last chunk
+        if chunk.is_final and audio.shape[1] > 0:
             logger.debug(
-                "[%s] FINAL feed: %d (remaining frames)",
+                "[%s] FINAL: flushing %d remaining samples (%.1f ms)",
                 self.conn_id,
-                int(to_feed.shape[1]),
+                audio.shape[1],
+                1000.0 * audio.shape[1] / float(TARGET_SR),
             )
-            text = _feed_buffer(to_feed, True)
+            
+            text = _feed_and_decode(audio, True)
             if text is not None:
                 latest_text = text
+            audio = audio[:, 0:0]  # consumed all
 
-        # Whatever remains after feeding full steps plus the non-frame-aligned tail becomes pending
+        # Update pending buffer
         if chunk.is_final:
             self._pending = None
         else:
-            if processable.shape[1] > 0:
-                self._pending = torch.cat([processable, tail], dim=1) if tail.numel() > 0 else processable
-            else:
-                self._pending = tail if tail.numel() > 0 else None
+            self._pending = audio if audio.shape[1] > 0 else None
+
         logger.debug(
-            "[%s] end of consume: pending=%d, latest_text_len=%d",
+            "[%s] consume_chunk done: pending=%d, latest_text='%s'",
             self.conn_id,
-            0 if self._pending is None else int(self._pending.shape[1]),
-            0 if latest_text is None else len(latest_text),
+            0 if self._pending is None else self._pending.shape[1],
+            latest_text if latest_text else "(none)",
         )
 
-        # On final, emit at least a final boundary even if no new text
+        # Handle output
         if latest_text is None and not chunk.is_final:
             return None
 
-        # Suppress duplicate emissions when hypothesis hasn't changed
+        # Suppress duplicate emissions
         if latest_text == self.last_text and not chunk.is_final:
-            logger.debug("[%s] suppress duplicate hypothesis: '%s'", self.conn_id, latest_text)
+            logger.debug("[%s] suppressing duplicate: '%s'", self.conn_id, latest_text)
             return None
 
         if latest_text is None:
             latest_text = self.last_text
 
+        # Compute delta
         if latest_text.startswith(self.last_text):
-            delta = latest_text[len(self.last_text) :]
+            delta = latest_text[len(self.last_text):]
         else:
             delta = latest_text
-        logger.debug("[%s] new text: '%s' (delta='%s')", self.conn_id, latest_text, delta)
+        
+        logger.debug("[%s] output: text='%s', delta='%s'", self.conn_id, latest_text, delta)
         self.last_text = latest_text
 
-        is_final = bool(chunk.is_final)
         result = StreamResult(
             conn_id=self.conn_id,
             chunk_id=chunk.chunk_id,
             text=latest_text,
             delta=delta,
-            is_final=is_final,
+            is_final=chunk.is_final,
         )
         
-        # If final, reset internal state for next utterance
-        if is_final:
+        # Reset for next utterance
+        if chunk.is_final:
             self._reset_for_new_utterance()
 
         return result

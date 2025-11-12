@@ -8,7 +8,7 @@ from torch.hub import load as torch_hub_load
 from .config import (
     STREAM_CHUNK_MS,
     STREAM_MAX_UNFLUSHED_MS,
-    STREAM_RIGHT_CONTEXT_MS,
+    STREAM_ENABLE_PARTIAL_FLUSH,
     SAMPLE_RATE,
     VAD_WINDOW_SAMPLES,
     VAD_THRESHOLD,
@@ -46,27 +46,28 @@ class StreamingVAD:
             speech_pad_ms=SPEECH_PAD_MS,
         )
         self.buffer = bytearray()
-        # windows in current output chunk buffer (resets after target flush)
+        # windows in current output chunk buffer (resets after flush)
         self.active_windows = 0
         # total windows since current speech started (resets only on end/max flush)
         self._speech_windows_total = 0
         self.in_speech = False
-        self._target_windows = max(1, STREAM_CHUNK_MS // 32)
-        # Max total windows allowed between VAD 'start' and forced reset
-        self._max_total_windows = max(self._target_windows, STREAM_MAX_UNFLUSHED_MS // 32)
-        # Cap a single output chunk size by (chunk + right) to avoid oversized chunks
-        self._max_chunk_windows = max(1, (STREAM_CHUNK_MS + STREAM_RIGHT_CONTEXT_MS) // 32)
+        # Treat non-positive chunk duration as "no partial flush" (only flush on silence/max duration)
+        self._target_windows = (
+            STREAM_CHUNK_MS // 32 if STREAM_ENABLE_PARTIAL_FLUSH and STREAM_CHUNK_MS > 0 else None
+        )
+        # Max total windows allowed between VAD 'start' and forced reset; always at least 1 window
+        raw_max_total = STREAM_MAX_UNFLUSHED_MS // 32 if STREAM_MAX_UNFLUSHED_MS > 0 else 0
+        self._max_total_windows = max(1, raw_max_total)
         logger.debug(
-            "VAD init: sr=%d, window=%d samp (%.1f ms), thresh=%.2f, min_sil=%d ms, pad=%d ms, target=%d win, max_total=%d win, max_chunk=%d win",
+            "VAD init: sr=%d, window=%d samp (%.1f ms), thresh=%.2f, min_sil=%d ms, pad=%d ms, target=%s win, max_total=%d win",
             SAMPLE_RATE,
             WINDOW_SAMPLES,
             1000.0 * WINDOW_SAMPLES / float(SAMPLE_RATE),
             THRESHOLD,
             MIN_SILENCE_MS,
             SPEECH_PAD_MS,
-            self._target_windows,
+            "disabled" if self._target_windows is None else self._target_windows,
             self._max_total_windows,
-            self._max_chunk_windows,
         )
 
     def reset(self) -> None:
@@ -138,7 +139,7 @@ class StreamingVAD:
             elif self.in_speech:
                 # Normal speech continuation: append this window
                 self.buffer.extend(_f32_to_pcm16(window))
-                self.active_windows = min(self.active_windows + 1, self._max_chunk_windows)
+                self.active_windows += 1
                 self._speech_windows_total += 1
                 buffered_now = True
                 logger.debug(
@@ -152,7 +153,7 @@ class StreamingVAD:
                 # still waiting for speech; do not emit chunks yet
                 continue
 
-            hit_target = self.active_windows >= self._target_windows
+            hit_target = self._target_windows is not None and self.active_windows >= self._target_windows
             hit_max_total = self._speech_windows_total >= self._max_total_windows
             ended = bool(voice_event and voice_event.get("end"))
 
@@ -163,14 +164,20 @@ class StreamingVAD:
                 lead_windows.clear()
                 logger.debug("VAD end: flush(end) -> chunks=%d", len(out))
             elif hit_target:
-                # Mid-speech partial flush; keep VAD states so we continue appending
+                # Optional mid-speech partial flush; keep decoder state so we can continue seamlessly.
                 out.extend(self._flush(reset_iterator=False, final=False))
-                logger.debug("VAD flush: hit target (%d win)", self._target_windows)
+                logger.debug(
+                    "VAD flush: hit target (%d win) -> partial chunk emitted",
+                    self._target_windows,
+                )
             elif hit_max_total:
                 out.extend(self._flush(reset_iterator=True, final=True))
                 self.in_speech = False
                 self._speech_windows_total = 0
                 lead_windows.clear()
-                logger.debug("VAD flush: hit max_total (%d win), reset VAD", self._max_total_windows)
+                logger.debug(
+                    "VAD flush: hit max_total (%d win), forcing final chunk",
+                    self._max_total_windows,
+                )
 
         return out
