@@ -1,13 +1,18 @@
 from contextlib import asynccontextmanager
 import contextlib
 import gc
+import tempfile
+import wave
+from pathlib import Path
+from typing import List, Sequence
 import torch, asyncio
-import nemo.collections.asr as nemo_asr
+import nemo.collections.asr as nemo_asr  # type: ignore[import]
 from omegaconf import open_dict
 
 from .config import MODEL_NAME, MODEL_PRECISION, DEVICE, logger
 
 from parakeet_service.batchworker import batch_worker
+from parakeet_service.types import AudioChunk
 
 
 def _to_builtin(obj):
@@ -35,8 +40,8 @@ async def lifespan(app):
         # Load model with configurable device and precision
         model = nemo_asr.models.ASRModel.from_pretrained(
             MODEL_NAME, 
-            map_location=DEVICE
-        ).to(dtype=dtype)
+            map_location=DEVICE # type: ignore
+        ).to(dtype=dtype) # type: ignore
         logger.info("Loaded model with %s weights on %s", MODEL_PRECISION.upper(), DEVICE)
         
     # Aggressive cleanup
@@ -71,3 +76,52 @@ def reset_fast_path(model):
         if getattr(model.cfg.decoding, "preserve_alignments", False):
             model.cfg.decoding.preserve_alignments = False
     model.change_decoding_strategy(model.cfg.decoding)
+
+
+def transcribe_stream_chunks(
+    model,
+    chunks: Sequence[AudioChunk],
+    batch_size: int | None = None,
+) -> List:
+    """Try in-memory transcription first; fall back to temp files if required."""
+
+    if not chunks:
+        return []
+
+    batch_size = batch_size or len(chunks)
+    waveforms = [chunk.to_float32() for chunk in chunks]
+
+    # Prefer direct in-memory transcription if the model supports it
+    try:
+        return model.transcribe(  # type: ignore[misc, call-arg]
+            audio=waveforms,
+            batch_size=batch_size,
+            sample_rate=chunks[0].sample_rate,
+        )
+    except Exception as exc:
+        logger.debug(
+            "transcribe(audio=…) not available (%s); falling back to temp files", exc
+        )
+
+    # Fallback: write each chunk to a temp .wav and call the standard path
+    temp_paths: List[Path] = []
+    try:
+        for chunk in chunks:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+            with wave.open(tmp, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(chunk.sample_rate)
+                wf.writeframes(chunk.pcm16)
+            tmp.flush()
+            tmp.close()
+            temp_paths.append(Path(tmp.name))
+
+        return model.transcribe(  # type: ignore[arg-type]
+            [str(p) for p in temp_paths],
+            batch_size=batch_size,
+        )
+    finally:
+        for path in temp_paths:
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink(missing_ok=True)

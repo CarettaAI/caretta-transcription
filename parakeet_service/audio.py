@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable, Tuple, List
 import tempfile
 
+import torch
 import torchaudio
 import torchaudio.functional as AF
 import soundfile as sf
@@ -18,6 +19,48 @@ from .config import TARGET_SR, logger
 
 
 SUPPORTED_EXTS: List[str] = [".wav", ".flac", ".mp3", ".ogg", ".opus"]
+
+
+def bytes_to_chunks(wav_bytes: bytes) -> List:
+    """Convert raw audio bytes (any format readable by soundfile) into
+    a list of in-memory `AudioChunk` objects using the streaming VAD.
+
+    This is a low-latency, in-memory path that avoids writing files to disk.
+    """
+    import io
+    import torch
+    from parakeet_service.streaming_vad import StreamingVAD
+    from parakeet_service.types import AudioChunk
+
+    # Read with soundfile (returns float32 -1..1)
+    try:
+        data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
+    except Exception as exc:
+        logger.debug("bytes_to_chunks: soundfile failed: %s", exc)
+        raise
+
+    # Mono
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+
+    # Resample if needed
+    if sr != TARGET_SR:
+        try:
+            tensor = torch.from_numpy(data).unsqueeze(0)
+            tensor = AF.resample(tensor, sr, TARGET_SR)
+            data = tensor.squeeze(0).numpy()
+            sr = TARGET_SR
+        except Exception as exc:
+            logger.debug("bytes_to_chunks: resample failed: %s", exc)
+            raise
+
+    # Convert float32 to int16 PCM bytes
+    pcm16 = np.clip(data * 32768, -32768, 32767).astype(np.int16).tobytes()
+
+    # Use the same StreamingVAD to produce AudioChunk objects
+    vad = StreamingVAD()
+    chunks = vad.feed(pcm16)
+    return chunks
 
 
 def convert_audio_streaming(src: Path) -> Tuple[Path, Path]:
@@ -48,7 +91,7 @@ def convert_audio_streaming(src: Path) -> Tuple[Path, Path]:
                     
                     # Resample if needed
                     if sr_orig != 16000:
-                        chunk_tensor = torchaudio.tensor(chunk).unsqueeze(0)
+                        chunk_tensor = torch.from_numpy(chunk).unsqueeze(0)
                         chunk = AF.resample(chunk_tensor, sr_orig, 16000)
                         chunk = chunk.squeeze(0).numpy()
                     

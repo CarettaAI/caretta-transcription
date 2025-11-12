@@ -16,7 +16,7 @@ async def ws_asr(ws: WebSocket):
                 frame = await ws.receive_bytes()
                 for chunk in vad.feed(frame):
                     await transcription_queue.put(chunk)
-                    await ws.send_json({"status": "queued"})
+                    await ws.send_json({"status": "queued", "chunk_id": chunk.chunk_id})
         except WebSocketDisconnect:
             pass
 
@@ -27,7 +27,7 @@ async def ws_asr(ws: WebSocket):
                 await condition.wait()          
             flushed = []
             for p, txt in list(results.items()):
-                await ws.send_json({"text": txt})
+                await ws.send_json({"chunk_id": p, "text": txt})
                 flushed.append(p)
             for p in flushed:
                 results.pop(p, None)

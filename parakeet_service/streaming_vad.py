@@ -1,9 +1,12 @@
 from __future__ import annotations
-import io, wave, tempfile, numpy as np, torch
+import uuid
+import numpy as np, torch
 from typing import List
 from torch.hub import load as torch_hub_load
 
-vad_model, vad_utils = torch_hub_load("snakers4/silero-vad", "silero_vad")
+from parakeet_service.types import AudioChunk
+
+vad_model, vad_utils = torch_hub_load("snakers4/silero-vad", "silero_vad")  # type: ignore[misc]
 (_, _, _, VADIterator, _) = vad_utils
 
 # TODO: Update to read from .env
@@ -21,7 +24,7 @@ def _f32_to_pcm16(frames: np.ndarray) -> bytes:
 class StreamingVAD:
     """
     Feed successive 20–40 ms PCM frames (16 kHz, int16 mono).
-    Emits temp-file *paths* when a full utterance is detected.
+    Emits in-memory ``AudioChunk`` objects when speech utterances complete.
     """
 
     def __init__(self):
@@ -36,22 +39,21 @@ class StreamingVAD:
         self.speech_ms = 0
 
 
-    def _flush(self) -> List[str]:
+    def _flush(self) -> List[AudioChunk]:
         if not self.buffer:
             return []
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        with wave.open(tmp, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(SAMPLE_RATE)
-            wf.writeframes(self.buffer)
+        chunk = AudioChunk(
+            chunk_id=uuid.uuid4().hex,
+            pcm16=bytes(self.buffer),
+            sample_rate=SAMPLE_RATE,
+        )
         self.buffer.clear()
         self.speech_ms = 0
         self.vad.reset_states()
-        return [tmp.name]
+        return [chunk]
 
-    def feed(self, frame_bytes: bytes) -> List[str]:
-        out: List[str] = []
+    def feed(self, frame_bytes: bytes) -> List[AudioChunk]:
+        out: List[AudioChunk] = []
 
         pcm_f32 = np.frombuffer(frame_bytes, np.int16).astype("float32") / 32768
         for start in range(0, len(pcm_f32), WINDOW_SAMPLES):
