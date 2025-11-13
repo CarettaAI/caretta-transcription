@@ -8,6 +8,8 @@ load_dotenv()
 MODEL_NAME = "nvidia/parakeet-tdt-0.6b-v3"  # Keep hardcoded as requested
 
 # Configuration from environment variables
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "1").lower()
+
 SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "16000"))          # model’s native sample-rate
 MODEL_PRECISION = os.getenv("MODEL_PRECISION", "fp16")
 DEVICE = os.getenv("DEVICE", "cuda")
