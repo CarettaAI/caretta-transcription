@@ -40,6 +40,10 @@ VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.40"))
 VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "400"))
 VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "300"))
 
+# Opus audio encoding configuration
+OPUS_ENABLED = os.getenv("OPUS_ENABLED", "1").lower() in {"1", "true", "yes"}
+OPUS_CHANNELS = int(os.getenv("OPUS_CHANNELS", "1"))  # mono audio
+
 # JWT Authentication configuration
 SUPABASE_ISSUER = os.getenv("SUPABASE_ISSUER", "")
 SUPABASE_JWKS = os.getenv("SUPABASE_JWKS", "")

@@ -8,8 +8,7 @@ from .auth import verify_websocket_auth
 from .batchworker import condition, results, transcription_queue
 from .streaming_engine import StreamTask, StreamingEngine
 from .streaming_vad import StreamingVAD
-from .config import logger
-
+from .config import logger, OPUS_ENABLED, OPUS_CHANNELS, SAMPLE_RATE
 router = APIRouter()
 
 
@@ -17,7 +16,6 @@ router = APIRouter()
 async def ws_asr(ws: WebSocket):
     # Verify authentication before accepting connection
     await verify_websocket_auth(ws)
-    
     await ws.accept()
 
     engine: StreamingEngine = ws.app.state.streaming_engine  # type: ignore[attr-defined]
@@ -26,6 +24,20 @@ async def ws_asr(ws: WebSocket):
     logger.debug("[ws %s] connection opened", conn_id)
     results.pop(conn_id, None)  # ensure clean slate
     vad = StreamingVAD()
+    
+    # Initialize Opus decoder if enabled
+    opus_decoder = None
+    if OPUS_ENABLED:
+        try:
+            import opuslib
+            opus_decoder = opuslib.Decoder(SAMPLE_RATE, OPUS_CHANNELS)
+            logger.debug("[ws %s] Opus decoder initialized (channels=%d, sample_rate=%d)", conn_id, OPUS_CHANNELS, SAMPLE_RATE)
+        except ImportError:
+            logger.error("[ws %s] opuslib not installed, Opus decoding disabled", conn_id)
+            opus_decoder = None
+        except Exception as e:
+            logger.error("[ws %s] Failed to initialize Opus decoder: %s", conn_id, e)
+            opus_decoder = None
 
     async def producer() -> None:
         """Push VAD-produced chunks into the shared transcription queue."""
@@ -33,6 +45,17 @@ async def ws_asr(ws: WebSocket):
             while True:
                 frame = await ws.receive_bytes()
                 #logger.debug("[ws %s] recv frame: %d bytes", conn_id, len(frame))
+                
+                # Decode Opus packet to PCM if Opus is enabled
+                if opus_decoder is not None:
+                    try:
+                        pcm_data = opus_decoder.decode(frame, frame_size=4096, decode_fec=False)
+                        frame = bytes(pcm_data)
+                        #logger.debug("[ws %s] decoded Opus packet: %d -> %d bytes", conn_id, len(frame), len(pcm_data))
+                    except Exception as e:
+                        logger.error("[ws %s] Opus decode failed: %s", conn_id, e)
+                        continue
+                
                 for chunk in vad.feed(frame):
                     await transcription_queue.put(StreamTask(conn_id=conn_id, chunk=chunk))
                     logger.debug("[ws %s] queued chunk: %s (%d samp) final=%s", conn_id, chunk.chunk_id, len(chunk), chunk.is_final)

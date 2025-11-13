@@ -13,3 +13,4 @@ cuda-python
 PyJWT[crypto]
 cryptography
 requests
+opuslib
