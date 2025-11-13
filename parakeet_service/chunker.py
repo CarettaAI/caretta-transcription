@@ -21,7 +21,7 @@ import soundfile as sf
 
 from torch.hub import load as torch_hub_load
 
-vad_model, vad_utils = torch_hub_load("snakers4/silero-vad", "silero_vad")
+vad_model, vad_utils = torch_hub_load("snakers4/silero-vad", "silero_vad") # type: ignore
 get_speech_ts, _, _, VADIterator, _ = vad_utils 
 
 SAMPLE_RATE        = 16_000

@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Parakeet Streaming Test</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; }
+    #controls { margin-bottom: 1rem; }
+    button { margin-right: .5rem; }
+    #log { white-space: pre-wrap; background:#f6f6f6; padding: 10px; border-radius:6px; height: 40vh; overflow:auto }
+  </style>
+</head>
+<body>
+  <h1>Parakeet WebSocket Mic Test</h1>
+  <div id="controls">
+    <button id="connect">Connect</button>
+    <button id="start" disabled>Start Mic</button>
+    <button id="stop" disabled>Stop Mic</button>
+    <label>Server: <input id="server" value="ws://localhost:8000/ws" size="30"></label>
+  </div>
+  <div id="status">Status: <span id="stat">disconnected</span></div>
+  <h3>Transcription</h3>
+  <div id="log"></div>
+
+<script>
+// Simple mic -> 16kHz int16 sender and WS receiver for parakeet service
+let ws = null;
+let audioCtx = null;
+let processor = null;
+let source = null;
+let micStream = null;
+const SAMPLE_RATE = 16000; // must match server SAMPLE_RATE
+
+const connectBtn = document.getElementById('connect');
+const startBtn = document.getElementById('start');
+const stopBtn = document.getElementById('stop');
+const serverInput = document.getElementById('server');
+const stat = document.getElementById('stat');
+const log = document.getElementById('log');
+
+function appendLog(s){
+  log.textContent += s + '\n';
+  log.scrollTop = log.scrollHeight;
+}
+
+connectBtn.onclick = () => {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  const url = serverInput.value;
+  appendLog('[ws] connecting to ' + url);
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { stat.textContent = 'connected'; appendLog('[ws] open'); startBtn.disabled = false; };
+  ws.onclose = () => { stat.textContent = 'closed'; appendLog('[ws] closed'); startBtn.disabled = true; stopBtn.disabled = true; };
+  ws.onerror = (e) => { appendLog('[ws] error: ' + e); };
+  ws.onmessage = (ev) => {
+    try{
+      const msg = typeof ev.data === 'string' ? JSON.parse(ev.data) : null;
+      if (msg && msg.text !== undefined) {
+        appendLog('[asr] ' + (msg.delta ? '+' : '') + msg.text);
+      } else if (msg && msg.status) {
+        appendLog('[server] ' + JSON.stringify(msg));
+      } else {
+        appendLog('[ws] received binary ' + ev.data.byteLength + ' bytes');
+      }
+    }catch(err){ appendLog('[ws] message parse error: '+err); }
+  };
+}
+
+startBtn.onclick = async () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { appendLog('Open websocket first'); return; }
+  startBtn.disabled = true; stopBtn.disabled = false;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  }catch(e){ appendLog('getUserMedia failed: '+e); startBtn.disabled=false; stopBtn.disabled=true; return; }
+
+  source = audioCtx.createMediaStreamSource(micStream);
+  // ScriptProcessorNode bufferSize: 4096 is safe and widely supported
+  const bufferSize = 4096;
+  processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+
+  processor.onaudioprocess = (evt) => {
+    const input = evt.inputBuffer.getChannelData(0);
+    const down = downsampleBuffer(input, audioCtx.sampleRate, SAMPLE_RATE);
+    if (!down) return;
+    const pcm16 = floatTo16BitPCM(down);
+    try{
+      ws.send(pcm16.buffer);
+    }catch(e){ appendLog('[ws] send error: '+e); }
+  };
+  source.connect(processor);
+  processor.connect(audioCtx.destination); // some browsers require connecting
+  appendLog('mic started (audioCtx sampleRate=' + audioCtx.sampleRate + ')');
+}
+
+stopBtn.onclick = () => {
+  stopBtn.disabled = true; startBtn.disabled = false;
+  if (processor) { processor.disconnect(); processor.onaudioprocess = null; processor = null; }
+  if (source) { source.disconnect(); source = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  appendLog('mic stopped');
+}
+
+// helper: linear downsample float32 array from inputSampleRate -> outputSampleRate
+function downsampleBuffer(buffer, inputSampleRate, outputSampleRate){
+  if (outputSampleRate === inputSampleRate) return buffer;
+  if (outputSampleRate > inputSampleRate) {
+    console.warn('Upsampling not supported'); return null;
+  }
+  const sampleRateRatio = inputSampleRate / outputSampleRate;
+  const newLength = Math.round(buffer.length / sampleRateRatio);
+  const result = new Float32Array(newLength);
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+    // simple average to avoid aliasing
+    let accum = 0, count = 0;
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) { accum += buffer[i]; count++; }
+    result[offsetResult] = count ? (accum / count) : 0;
+    offsetResult++;
+    offsetBuffer = nextOffsetBuffer;
+  }
+  return result;
+}
+
+function floatTo16BitPCM(float32Array) {
+  const l = float32Array.length;
+  const buf = new ArrayBuffer(l * 2);
+  const view = new DataView(buf);
+  let offset = 0;
+  for (let i = 0; i < l; i++, offset += 2) {
+    let s = Math.max(-1, Math.min(1, float32Array[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Int16Array(buf);
+}
+
+</script>
+</body>
+</html>

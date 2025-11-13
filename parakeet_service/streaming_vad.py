@@ -1,18 +1,31 @@
 from __future__ import annotations
-import io, wave, tempfile, numpy as np, torch
+import uuid
 from typing import List
+
+import numpy as np
 from torch.hub import load as torch_hub_load
 
-vad_model, vad_utils = torch_hub_load("snakers4/silero-vad", "silero_vad")
+from .config import (
+    STREAM_CHUNK_MS,
+    STREAM_MAX_UNFLUSHED_MS,
+    STREAM_ENABLE_PARTIAL_FLUSH,
+    SAMPLE_RATE,
+    VAD_WINDOW_SAMPLES,
+    VAD_THRESHOLD,
+    VAD_MIN_SILENCE_MS,
+    VAD_SPEECH_PAD_MS,
+    logger,
+)
+from .types import AudioChunk
+
+vad_model, vad_utils = torch_hub_load("snakers4/silero-vad", "silero_vad")  # type: ignore[misc]
 (_, _, _, VADIterator, _) = vad_utils
 
-# TODO: Update to read from .env
-SAMPLE_RATE              = 16_000         # model is trained for 16 kHz
-WINDOW_SAMPLES           = 512            # 32 ms frame
-THRESHOLD                = 0.60           # voice prob ≥ 0.60 → speech
-MIN_SILENCE_MS           = 250            # flush after ≥250 ms quiet
-SPEECH_PAD_MS            = 120            # keep 120 ms context before/after
-MAX_SPEECH_MS            = 8_000          # hard stop at 8 s
+# VAD / streaming constants are now configurable via `parakeet_service.config` (environment variables)
+WINDOW_SAMPLES = VAD_WINDOW_SAMPLES
+THRESHOLD = VAD_THRESHOLD
+MIN_SILENCE_MS = VAD_MIN_SILENCE_MS
+SPEECH_PAD_MS = VAD_SPEECH_PAD_MS
 
 # Helper: float32 → int16 PCM bytes
 def _f32_to_pcm16(frames: np.ndarray) -> bytes:
@@ -21,7 +34,7 @@ def _f32_to_pcm16(frames: np.ndarray) -> bytes:
 class StreamingVAD:
     """
     Feed successive 20–40 ms PCM frames (16 kHz, int16 mono).
-    Emits temp-file *paths* when a full utterance is detected.
+    Emits in-memory ``AudioChunk`` objects when speech utterances complete.
     """
 
     def __init__(self):
@@ -33,40 +46,138 @@ class StreamingVAD:
             speech_pad_ms=SPEECH_PAD_MS,
         )
         self.buffer = bytearray()
-        self.speech_ms = 0
+        # windows in current output chunk buffer (resets after flush)
+        self.active_windows = 0
+        # total windows since current speech started (resets only on end/max flush)
+        self._speech_windows_total = 0
+        self.in_speech = False
+        # Treat non-positive chunk duration as "no partial flush" (only flush on silence/max duration)
+        self._target_windows = (
+            STREAM_CHUNK_MS // 32 if STREAM_ENABLE_PARTIAL_FLUSH and STREAM_CHUNK_MS > 0 else None
+        )
+        # Max total windows allowed between VAD 'start' and forced reset; always at least 1 window
+        raw_max_total = STREAM_MAX_UNFLUSHED_MS // 32 if STREAM_MAX_UNFLUSHED_MS > 0 else 0
+        self._max_total_windows = max(1, raw_max_total)
+        logger.debug(
+            "VAD init: sr=%d, window=%d samp (%.1f ms), thresh=%.2f, min_sil=%d ms, pad=%d ms, target=%s win, max_total=%d win",
+            SAMPLE_RATE,
+            WINDOW_SAMPLES,
+            1000.0 * WINDOW_SAMPLES / float(SAMPLE_RATE),
+            THRESHOLD,
+            MIN_SILENCE_MS,
+            SPEECH_PAD_MS,
+            "disabled" if self._target_windows is None else self._target_windows,
+            self._max_total_windows,
+        )
 
+    def reset(self) -> None:
+        self.buffer.clear()
+        self.active_windows = 0
+        self._speech_windows_total = 0
+        self.in_speech = False
+        self.vad.reset_states()
+        logger.debug("VAD reset: buffers cleared")
 
-    def _flush(self) -> List[str]:
+    def _flush(self, reset_iterator: bool, *, final: bool) -> List[AudioChunk]:
         if not self.buffer:
             return []
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        with wave.open(tmp, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(SAMPLE_RATE)
-            wf.writeframes(self.buffer)
+        chunk = AudioChunk(
+            chunk_id=uuid.uuid4().hex,
+            pcm16=bytes(self.buffer),
+            sample_rate=SAMPLE_RATE,
+            is_final=final,
+        )
         self.buffer.clear()
-        self.speech_ms = 0
-        self.vad.reset_states()
-        return [tmp.name]
+        self.active_windows = 0
+        if reset_iterator:
+            self.vad.reset_states()
+        return [chunk]
 
-    def feed(self, frame_bytes: bytes) -> List[str]:
-        out: List[str] = []
+    def feed(self, frame_bytes: bytes) -> List[AudioChunk]:
+        out: List[AudioChunk] = []
 
         pcm_f32 = np.frombuffer(frame_bytes, np.int16).astype("float32") / 32768
+        #logger.debug("VAD feed: got %d bytes (%.1f ms)", len(frame_bytes), 1000.0 * len(pcm_f32) / SAMPLE_RATE)
+        pad_window_count = max(SPEECH_PAD_MS // 32, 0)
+        lead_windows: List[np.ndarray] = []
+
         for start in range(0, len(pcm_f32), WINDOW_SAMPLES):
             window = pcm_f32[start:start + WINDOW_SAMPLES]
             if len(window) < WINDOW_SAMPLES:
                 break  # wait for full 32 ms window
 
             voice_event = self.vad(window, return_seconds=False)
-            self.buffer.extend(_f32_to_pcm16(window))
-            self.speech_ms += 32
+            if voice_event:
+                logger.debug("VAD evt: %s", voice_event)
 
-            # Flush on trailing-silence event or max-length guard
-            if voice_event and voice_event.get("end"):
-                out.extend(self._flush())
-            elif self.speech_ms >= MAX_SPEECH_MS:
-                out.extend(self._flush())
+            # Maintain leading windows so we can prepend pad when speech begins
+            lead_windows.append(window)
+            if len(lead_windows) > pad_window_count:
+                lead_windows.pop(0)
+
+            buffered_now = False
+            if voice_event and voice_event.get("start") is not None:
+                # Entering speech: prepend lead windows and include the current window
+                self.in_speech = True
+                for buffered in lead_windows:
+                    self.buffer.extend(_f32_to_pcm16(buffered))
+                # append the current window that triggered the start
+                self.buffer.extend(_f32_to_pcm16(window))
+                # Initialize counters
+                self.active_windows = len(lead_windows) + 1
+                self._speech_windows_total = len(lead_windows) + 1
+                lead_windows.clear()
+                buffered_now = True
+                logger.debug(
+                    "VAD start: prime=%d win, active=%d, total=%d, buf_ms=%.1f",
+                    pad_window_count,
+                    self.active_windows,
+                    self._speech_windows_total,
+                    1000.0 * (len(self.buffer) // 2) / SAMPLE_RATE,
+                )
+
+            elif self.in_speech:
+                # Normal speech continuation: append this window
+                self.buffer.extend(_f32_to_pcm16(window))
+                self.active_windows += 1
+                self._speech_windows_total += 1
+                buffered_now = True
+                logger.debug(
+                    "VAD speech: +1 win -> active=%d, total=%d, buf_ms=%.1f",
+                    self.active_windows,
+                    self._speech_windows_total,
+                    1000.0 * (len(self.buffer) // 2) / SAMPLE_RATE,
+                )
+
+            if not buffered_now:
+                # still waiting for speech; do not emit chunks yet
+                continue
+
+            hit_target = self._target_windows is not None and self.active_windows >= self._target_windows
+            hit_max_total = self._speech_windows_total >= self._max_total_windows
+            ended = bool(voice_event and voice_event.get("end"))
+
+            if ended:
+                out.extend(self._flush(reset_iterator=True, final=True))
+                self.in_speech = False
+                self._speech_windows_total = 0
+                lead_windows.clear()
+                logger.debug("VAD end: flush(end) -> chunks=%d", len(out))
+            elif hit_target:
+                # Optional mid-speech partial flush; keep decoder state so we can continue seamlessly.
+                out.extend(self._flush(reset_iterator=False, final=False))
+                logger.debug(
+                    "VAD flush: hit target (%d win) -> partial chunk emitted",
+                    self._target_windows,
+                )
+            elif hit_max_total:
+                out.extend(self._flush(reset_iterator=True, final=True))
+                self.in_speech = False
+                self._speech_windows_total = 0
+                lead_windows.clear()
+                logger.debug(
+                    "VAD flush: hit max_total (%d win), forcing final chunk",
+                    self._max_total_windows,
+                )
 
         return out
