@@ -84,7 +84,7 @@ DEVICE=cuda
 BATCH_SIZE=4
 
 # Audio processing
-TARGET_SR=16000
+SAMPLE_RATE=16000
 MAX_AUDIO_DURATION=30
 VAD_THRESHOLD=0.5
 
@@ -204,7 +204,7 @@ H --> A
 | `MODEL_PRECISION` | fp16 | Model precision (fp16/fp32) |
 | `DEVICE` | cuda | Computation device |
 | `BATCH_SIZE` | 4 | Processing batch size |
-| `TARGET_SR` | 16000 | Target sample rate |
+| `SAMPLE_RATE` | 16000 | Target sample rate |
 | `MAX_AUDIO_DURATION` | 30 | Max audio length in seconds |
 | `VAD_THRESHOLD` | 0.5 | Voice activity threshold |
 | `LOG_LEVEL` | INFO | Logging verbosity |

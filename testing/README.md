@@ -9,7 +9,7 @@ How to use (quick):
 
 Notes
 - The client downsamples in JS with a simple averaging filter. It's not as high-quality as a proper resampler but is adequate for testing.
-- Ensure the server expects 16 kHz int16 PCM (default config). If you changed TARGET_SR or SAMPLE_RATE in `.env`, edit the `TARGET_SR` constant inside `index.html` to match.
+- Ensure the server expects 16 kHz int16 PCM (default config). If you changed SAMPLE_RATE or SAMPLE_RATE in `.env`, edit the `SAMPLE_RATE` constant inside `index.html` to match.
 
 Running the server locally (powershell example)
 ---------------------------------------------

@@ -15,7 +15,7 @@ import soundfile as sf
 import numpy as np
 from fastapi import BackgroundTasks, HTTPException, status
 
-from .config import TARGET_SR, logger
+from .config import SAMPLE_RATE, logger
 
 
 SUPPORTED_EXTS: List[str] = [".wav", ".flac", ".mp3", ".ogg", ".opus"]
@@ -44,12 +44,12 @@ def bytes_to_chunks(wav_bytes: bytes) -> List:
         data = data.mean(axis=1)
 
     # Resample if needed
-    if sr != TARGET_SR:
+    if sr != SAMPLE_RATE:
         try:
             tensor = torch.from_numpy(data).unsqueeze(0)
-            tensor = AF.resample(tensor, sr, TARGET_SR)
+            tensor = AF.resample(tensor, sr, SAMPLE_RATE)
             data = tensor.squeeze(0).numpy()
-            sr = TARGET_SR
+            sr = SAMPLE_RATE
         except Exception as exc:
             logger.debug("bytes_to_chunks: resample failed: %s", exc)
             raise
@@ -113,17 +113,17 @@ def ensure_mono_16k_standard(src: Path) -> Tuple[Path, Path]:
     if wav.shape[0] > 1:                       # stereo → mono
         wav = wav.mean(dim=0, keepdim=True)
 
-    if sr != TARGET_SR:
-        wav = AF.resample(wav, sr, TARGET_SR)
+    if sr != SAMPLE_RATE:
+        wav = AF.resample(wav, sr, SAMPLE_RATE)
 
-    if src.suffix.lower() == ".wav" and sr == TARGET_SR:
+    if src.suffix.lower() == ".wav" and sr == SAMPLE_RATE:
         # rewrite header to 16-bit PCM in-place
-        torchaudio.save(src, wav, TARGET_SR,
+        torchaudio.save(src, wav, SAMPLE_RATE,
                         encoding="PCM_S", bits_per_sample=16)
         return src, src
 
     dst = src.with_suffix(".wav")
-    torchaudio.save(dst, wav, TARGET_SR,
+    torchaudio.save(dst, wav, SAMPLE_RATE,
                     encoding="PCM_S", bits_per_sample=16)
     return src, dst
 

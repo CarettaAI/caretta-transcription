@@ -30,7 +30,7 @@ let audioCtx = null;
 let processor = null;
 let source = null;
 let micStream = null;
-const TARGET_SR = 16000; // must match server SAMPLE_RATE
+const SAMPLE_RATE = 16000; // must match server SAMPLE_RATE
 
 const connectBtn = document.getElementById('connect');
 const startBtn = document.getElementById('start');
@@ -82,7 +82,7 @@ startBtn.onclick = async () => {
 
   processor.onaudioprocess = (evt) => {
     const input = evt.inputBuffer.getChannelData(0);
-    const down = downsampleBuffer(input, audioCtx.sampleRate, TARGET_SR);
+    const down = downsampleBuffer(input, audioCtx.sampleRate, SAMPLE_RATE);
     if (!down) return;
     const pcm16 = floatTo16BitPCM(down);
     try{

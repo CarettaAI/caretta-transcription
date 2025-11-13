@@ -19,7 +19,7 @@ import soundfile as sf
 import torch
 import numpy as np
 import torchaudio.functional as AF
-from .config import TARGET_SR
+from .config import SAMPLE_RATE
 
 from parakeet_service.model import reset_fast_path
 from parakeet_service.chunker import vad_chunk_lowmem, vad_chunk_streaming
@@ -95,12 +95,12 @@ async def transcribe_audio(
             data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32")
             if data.ndim > 1:
                 data = data.mean(axis=1)
-            if sr != TARGET_SR:
+            if sr != SAMPLE_RATE:
                 tensor = torch.from_numpy(data).unsqueeze(0)
-                tensor = AF.resample(tensor, sr, TARGET_SR)
+                tensor = AF.resample(tensor, sr, SAMPLE_RATE)
                 data = tensor.squeeze(0).numpy()
             pcm16 = np.clip(data * 32768, -32768, 32767).astype(np.int16).tobytes()
-            chunks = [AudioChunk(chunk_id=uuid.uuid4().hex, pcm16=pcm16, sample_rate=TARGET_SR)]
+            chunks = [AudioChunk(chunk_id=uuid.uuid4().hex, pcm16=pcm16, sample_rate=SAMPLE_RATE)]
 
         logger.info("transcribe(): (fast-path) sending %d chunks to ASR", len(chunks))
 

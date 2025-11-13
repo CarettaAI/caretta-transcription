@@ -16,7 +16,7 @@ from .config import (
     STREAM_CHUNK_SECS,
     STREAM_LEFT_CONTEXT_SECS,
     STREAM_RIGHT_CONTEXT_SECS,
-    TARGET_SR,
+    SAMPLE_RATE,
     logger,
 )
 from .types import AudioChunk
@@ -113,9 +113,9 @@ class StreamingSession:
         if self.is_closed:
             logger.debug("Skipping chunk for closed session %s", self.conn_id)
             return None
-        if chunk.sample_rate != TARGET_SR:
+        if chunk.sample_rate != SAMPLE_RATE:
             raise ValueError(
-                f"Unsupported sample rate {chunk.sample_rate}; expected {TARGET_SR} Hz"
+                f"Unsupported sample rate {chunk.sample_rate}; expected {SAMPLE_RATE} Hz"
             )
 
         device = self.engine.device
@@ -134,7 +134,7 @@ class StreamingSession:
             chunk.chunk_id,
             audio.shape[1] - (0 if self._pending is None else self._pending.shape[1]),
             audio.shape[1],
-            1000.0 * audio.shape[1] / float(TARGET_SR),
+            1000.0 * audio.shape[1] / float(SAMPLE_RATE),
             self._primed,
         )
 
@@ -200,7 +200,7 @@ class StreamingSession:
                 "[%s] PRIME: feeding %d samples (%.1f ms), remaining=%d, is_last=%s",
                 self.conn_id,
                 to_feed.shape[1],
-                1000.0 * to_feed.shape[1] / float(TARGET_SR),
+                1000.0 * to_feed.shape[1] / float(SAMPLE_RATE),
                 remaining.shape[1],
                 is_last,
             )
@@ -223,7 +223,7 @@ class StreamingSession:
                 "[%s] CHUNK: feeding %d samples (%.1f ms), remaining=%d, is_last=%s",
                 self.conn_id,
                 to_feed.shape[1],
-                1000.0 * to_feed.shape[1] / float(TARGET_SR),
+                1000.0 * to_feed.shape[1] / float(SAMPLE_RATE),
                 remaining.shape[1],
                 is_last,
             )
@@ -240,7 +240,7 @@ class StreamingSession:
                 "[%s] FINAL: flushing %d remaining samples (%.1f ms)",
                 self.conn_id,
                 audio.shape[1],
-                1000.0 * audio.shape[1] / float(TARGET_SR),
+                1000.0 * audio.shape[1] / float(SAMPLE_RATE),
             )
             
             text = _feed_and_decode(audio, True)
