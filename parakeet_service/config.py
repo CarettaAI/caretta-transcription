@@ -13,7 +13,6 @@ MODEL_PRECISION = os.getenv("MODEL_PRECISION", "fp16")
 DEVICE = os.getenv("DEVICE", "cuda")
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "4"))
 MAX_AUDIO_DURATION = int(os.getenv("MAX_AUDIO_DURATION", "30"))   # seconds
-VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
 PROCESSING_TIMEOUT = int(os.getenv("PROCESSING_TIMEOUT", "60"))    # seconds
 
 # Streaming configuration
