@@ -33,7 +33,7 @@ def health():
     return {"status": "ok"}
 
 
-@router.post(
+""" @router.post(
     "/transcribe",
     response_model=TranscriptionResponse,
     summary="Transcribe an audio file",
@@ -42,7 +42,7 @@ def health():
     "/audio/transcriptions",
     response_model=TranscriptionResponse,
     summary="Transcribe an audio file",
-)
+) """
 async def transcribe_audio(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -201,7 +201,7 @@ async def transcribe_audio(
 
     return TranscriptionResponse(text=merged_text, timestamps=timestamps)
 
-@router.get("/debug/cfg")
+# @router.get("/debug/cfg")
 def show_cfg(request: Request):
     from omegaconf import OmegaConf
     model = request.app.state.asr_model         

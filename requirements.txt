@@ -10,3 +10,6 @@ python-multipart
 ffmpeg-python
 python-dotenv
 cuda-python
+PyJWT[crypto]
+cryptography
+requests

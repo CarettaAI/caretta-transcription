@@ -40,6 +40,11 @@ VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.40"))
 VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "400"))
 VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "300"))
 
+# JWT Authentication configuration
+SUPABASE_ISSUER = os.getenv("SUPABASE_ISSUER", "")
+SUPABASE_JWKS = os.getenv("SUPABASE_JWKS", "")
+EXPECT_AUD = os.getenv("EXPECT_AUD", "authenticated")
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=LOG_LEVEL,

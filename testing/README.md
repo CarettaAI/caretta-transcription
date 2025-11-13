@@ -28,8 +28,3 @@ Important tips
 - The model loads on startup and may take some time and lots of RAM/GPU. For local testing set `DEVICE=cpu` in your `.env` if you don't have a GPU.
 - If running into CORS or mixed-content errors, make sure you serve the HTML via `http://` and the WS uses `ws://` (or both `https` and `wss`).
 - For production use, use an orchestrator (k8s) and set `DEVICE=cuda` for GPU nodes.
-
-If you'd like, I can:
-- Add a tiny HTTP static server to serve `testing/index.html` so you can open `http://localhost:8000/test` and avoid file:// issues.
-- Improve client resampling quality using an AudioWorklet.
-- Provide an automated smoke-test (play an audio file through the WS and validate transcripts).

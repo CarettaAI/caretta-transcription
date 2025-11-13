@@ -18,6 +18,8 @@
     <button id="start" disabled>Start Mic</button>
     <button id="stop" disabled>Stop Mic</button>
     <label>Server: <input id="server" value="ws://localhost:8000/ws" size="30"></label>
+    <br><br>
+    <label>JWT Token (optional): <input id="token" type="text" size="60" placeholder="Bearer token for authentication"></label>
   </div>
   <div id="status">Status: <span id="stat">disconnected</span></div>
   <h3>Transcription</h3>
@@ -36,6 +38,7 @@ const connectBtn = document.getElementById('connect');
 const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
 const serverInput = document.getElementById('server');
+const tokenInput = document.getElementById('token');
 const stat = document.getElementById('stat');
 const log = document.getElementById('log');
 
@@ -46,8 +49,17 @@ function appendLog(s){
 
 connectBtn.onclick = () => {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  const url = serverInput.value;
-  appendLog('[ws] connecting to ' + url);
+  let url = serverInput.value;
+  const token = tokenInput.value.trim();
+  
+  // Add token as query parameter if provided
+  if (token) {
+    const separator = url.includes('?') ? '&' : '?';
+    url += separator + 'token=' + encodeURIComponent(token);
+    appendLog('[ws] connecting with JWT token');
+  }
+  
+  appendLog('[ws] connecting to ' + serverInput.value);
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { stat.textContent = 'connected'; appendLog('[ws] open'); startBtn.disabled = false; };

@@ -4,6 +4,7 @@ import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from .auth import verify_websocket_auth
 from .batchworker import condition, results, transcription_queue
 from .streaming_engine import StreamTask, StreamingEngine
 from .streaming_vad import StreamingVAD
@@ -14,6 +15,9 @@ router = APIRouter()
 
 @router.websocket("/ws")
 async def ws_asr(ws: WebSocket):
+    # Verify authentication before accepting connection
+    await verify_websocket_auth(ws)
+    
     await ws.accept()
 
     engine: StreamingEngine = ws.app.state.streaming_engine  # type: ignore[attr-defined]
