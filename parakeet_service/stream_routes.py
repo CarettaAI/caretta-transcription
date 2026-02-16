@@ -87,6 +87,8 @@ async def ws_asr(ws: WebSocket):
                             "text": item.text,
                             "delta": item.delta,
                             "is_final": item.is_final,
+                            "processing_time_ms": round(item.processing_time_ms, 2),
+                            "latency_ms": round(item.latency_ms, 2),
                         }
                     )
         except WebSocketDisconnect:

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
+import time
 
 
 @dataclass(slots=True)
@@ -13,6 +14,7 @@ class AudioChunk:
     sample_rate: int
     # True if this chunk corresponds to an utterance end from VAD
     is_final: bool = False
+    created_at: float = field(default_factory=time.time)
 
     def to_float32(self) -> np.ndarray:
         """Return normalised float32 waveform [-1, 1]."""

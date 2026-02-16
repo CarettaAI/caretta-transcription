@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from collections import defaultdict
 
@@ -54,6 +55,7 @@ async def transcribe_audio(
         description="If true (default), split long audio into "
                     "~60s VAD-aligned chunks for batching"),
 ):
+    t0 = time.perf_counter()
     # Create temp file name (used only by fallback). Prefer in-memory fast-path.
     suffix = Path(file.filename or "").suffix or ".wav"
 
@@ -121,7 +123,12 @@ async def transcribe_audio(
 
         merged_text = " ".join(texts).strip()
         timestamps = dict(merged) if include_timestamps else None
-        return TranscriptionResponse(text=merged_text, timestamps=timestamps)
+        processing_time_ms = (time.perf_counter() - t0) * 1000.0
+        return TranscriptionResponse(
+            text=merged_text,
+            timestamps=timestamps,
+            processing_time_ms=round(processing_time_ms, 2)
+        )
     except asyncio.CancelledError:
         # Clean up temporary files if processing was cancelled
         if tmp_path and tmp_path.exists():
@@ -199,7 +206,12 @@ async def transcribe_audio(
     merged_text = " ".join(texts).strip()
     timestamps  = dict(merged) if include_timestamps else None
 
-    return TranscriptionResponse(text=merged_text, timestamps=timestamps)
+    processing_time_ms = (time.perf_counter() - t0) * 1000.0
+    return TranscriptionResponse(
+        text=merged_text,
+        timestamps=timestamps,
+        processing_time_ms=round(processing_time_ms, 2)
+    )
 
 # @router.get("/debug/cfg")
 def show_cfg(request: Request):

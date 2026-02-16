@@ -9,3 +9,7 @@ class TranscriptionResponse(BaseModel):
         None,
         description="Word/segment/char offsets (see NeMo docs).",
     )
+    processing_time_ms: Optional[float] = Field(
+        None,
+        description="Time taken to process the audio in milliseconds.",
+    )

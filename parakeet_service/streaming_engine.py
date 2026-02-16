@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 import threading
@@ -43,6 +45,8 @@ class StreamResult:
     text: str
     delta: str
     is_final: bool = False
+    processing_time_ms: float = 0.0
+    latency_ms: float = 0.0
 
 
 class StreamingSession:
@@ -110,6 +114,7 @@ class StreamingSession:
         3. Buffer maintains: left + chunk + right context
         4. Decode only: chunk portion (after removing left context)
         """
+        t0 = time.perf_counter()
         if self.is_closed:
             logger.debug("Skipping chunk for closed session %s", self.conn_id)
             return None
@@ -282,12 +287,18 @@ class StreamingSession:
         logger.debug("[%s] output: text='%s', delta='%s'", self.conn_id, latest_text, delta)
         self.last_text = latest_text
 
+        t1 = time.perf_counter()
+        processing_time_ms = (t1 - t0) * 1000.0
+        latency_ms = (time.time() - chunk.created_at) * 1000.0
+
         result = StreamResult(
             conn_id=self.conn_id,
             chunk_id=chunk.chunk_id,
             text=latest_text,
             delta=delta,
             is_final=chunk.is_final,
+            processing_time_ms=processing_time_ms,
+            latency_ms=latency_ms,
         )
         
         # Reset for next utterance
